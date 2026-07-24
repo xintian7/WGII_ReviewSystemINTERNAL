@@ -1,7 +1,9 @@
 import streamlit as st
 
 from pageFilterComments import render_comment_analysis_tab
+from pageDevelopmentPlan import render_todo_page
 from pageSetting import initialize_auth_state, is_auth_unlocked, render_setting_page
+from pageUserGuide import render_user_guide_page
 
 
 # ---------- Placeholder page renderers ----------
@@ -15,11 +17,6 @@ def render_disclaimer_page() -> None:
     st.markdown("# Disclaimer")
 
 
-def render_user_guide_page() -> None:
-    st.divider()
-    st.markdown("# User Guide")
-
-
 def render_give_feedback_page() -> None:
     st.divider()
     st.markdown("# Give Feedback")
@@ -28,11 +25,6 @@ def render_give_feedback_page() -> None:
 def render_other_apps_page() -> None:
     st.divider()
     st.markdown("# Other Apps")
-
-
-def render_todo_page() -> None:
-    st.divider()
-    st.markdown("# Development Plan")
 
 
 def render_comment_analysis_page() -> None:
