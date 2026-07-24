@@ -1,4 +1,4 @@
-# 1. Open the app
+## 1. Open the app
 
 Visit: https://wg2revcom.streamlit.app/
 
