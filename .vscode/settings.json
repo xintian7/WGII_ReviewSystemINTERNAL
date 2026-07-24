@@ -1,0 +1,10 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "chat.tools.terminal.autoApprove": {
+        "/^conda activate tsu_revcom && python sripts/classify_unknown_affiliations_gpt\\.py --input data/revcom\\.parquet\\.enc --output affiliation_gpt_test30\\.xlsx --limit 30 --deployment gpt-5\\.2$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
