@@ -33,6 +33,7 @@ EXPORT_EXCLUDED_COLUMNS = [
 def _initial_applied_filters() -> dict[str, object]:
     return {
         "chapters": [],
+        "nfp": "",
         "categories": [],
         "subcategories": [],
         "aff_types": [],
@@ -47,6 +48,7 @@ def _reset_comment_analysis_state() -> None:
     st.session_state["review_page_size"] = DEFAULT_PAGE_SIZE
     st.session_state["review_applied_filters"] = {
         "chapters": [],
+        "nfp": "",
         "categories": [],
         "subcategories": [],
         "aff_types": [],
@@ -55,6 +57,7 @@ def _reset_comment_analysis_state() -> None:
     }
 
     st.session_state["filter_chapters"] = []
+    st.session_state["filter_nfp"] = ""
     st.session_state["filter_aff_types"] = []
     st.session_state["filter_categories"] = []
     st.session_state["filter_subcategories"] = []
@@ -137,6 +140,7 @@ def _load_metadata_dataframe() -> pd.DataFrame:
         "chapter",
         "category",
         "subcategory",
+        "isfp",
         "primary_result_after_gpt",
         "comment",
         "affiliation",
@@ -188,6 +192,7 @@ def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFr
     out = df.copy()
 
     chapters = list(filters.get("chapters", []))
+    nfp = str(filters.get("nfp", "")).strip().lower()
     categories = list(filters.get("categories", []))
     subcategories = list(filters.get("subcategories", []))
     aff_types = list(filters.get("aff_types", []))
@@ -196,6 +201,12 @@ def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFr
 
     if chapters:
         out = out[out["chapter"].isin(chapters)]
+    if nfp:
+        isfp_numeric = pd.to_numeric(out["isfp"], errors="coerce")
+        if nfp == "yes":
+            out = out[isfp_numeric == 1]
+        elif nfp == "no":
+            out = out[isfp_numeric == 0]
     if categories:
         out = out[out["category"].isin(categories)]
     if subcategories:
@@ -307,6 +318,16 @@ def _render_card(row: pd.Series, comment_keyword: str = "") -> None:
     aff_type = html.escape(str(row.get("primary_result_after_gpt", "")))
     affiliation = html.escape(str(row.get("affiliation", "")))
     country = html.escape(str(row.get("country", "")))
+    isfp_val = pd.to_numeric(pd.Series([row.get("isfp", "")]), errors="coerce").iloc[0]
+    if pd.isna(isfp_val):
+        nfp = ""
+    elif int(isfp_val) == 1:
+        nfp = "Yes"
+    elif int(isfp_val) == 0:
+        nfp = "No"
+    else:
+        nfp = ""
+    nfp = html.escape(nfp)
     action = html.escape(str(row.get("Action", "")))
     commentid = html.escape(str(row.get("commentid", "")))
     frompage = html.escape(str(row.get("frompage", "")))
@@ -325,7 +346,7 @@ def _render_card(row: pd.Series, comment_keyword: str = "") -> None:
             <div class="review-row"><span class="review-label">Page Range:</span> {frompage} - {topage} | <span class="review-label">Comment ID:</span> {commentid}</div>
             <div class="review-row"><span class="review-label">Affiliation:</span> {affiliation}</div>
             <div class="review-row"><span class="review-label">Affilation Type (LLM-generated, Reference only):</span> {aff_type}</div>
-            <div class="review-row"><span class="review-label">Reviewer:</span> {reviewer} | <span class="review-label">Country:</span> {country}</div>
+            <div class="review-row"><span class="review-label">Reviewer:</span> {reviewer} | <span class="review-label">Country:</span> {country} | <span class="review-label">NFP:</span> {nfp}</div>
             <div class="review-row"><span class="review-label">Comment:</span> {comment}</div>
         </div>
         """,
@@ -546,6 +567,12 @@ def render_comment_analysis_tab() -> None:
             "Affilation type (LLM-categoried)", options=aff_types, default=[], key="filter_aff_types"
         )
 
+    row_nfp_col1, row_nfp_col2 = st.columns(2)
+    with row_nfp_col1:
+        selected_nfp = st.selectbox("NFP", options=["", "Yes", "No"], key="filter_nfp")
+    with row_nfp_col2:
+        st.write("")
+
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
         selected_categories = st.multiselect("Categories", options=categories, default=[], key="filter_categories")
@@ -612,6 +639,7 @@ def render_comment_analysis_tab() -> None:
     if apply_clicked:
         st.session_state["review_applied_filters"] = {
             "chapters": selected_chapters,
+            "nfp": selected_nfp,
             "categories": selected_categories,
             "subcategories": selected_subcategories,
             "aff_types": selected_aff_types,

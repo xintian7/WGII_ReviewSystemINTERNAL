@@ -23,7 +23,8 @@ from cryptography.fernet import Fernet
 
 
 DEFAULT_REVCOM_INPUT = "data/revcom.parquet.enc"
-DEFAULT_AFFILIATION_INPUT = "affiliation_identified.xlsx"
+DEFAULT_AFFILIATION_INPUT = "data/affiliation_identified.xlsx"
+DEFAULT_SRCITIES_INPUT = "srcities.csv"
 DEFAULT_OUTPUT = "metadata.parquet.enc"
 DEFAULT_KEY_ENV = "FERNET_KEY"
 
@@ -106,10 +107,11 @@ def _find_id_column(columns: list[str]) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Merge revcom.parquet.enc and affiliation_identified.xlsx into encrypted metadata.parquet.enc"
+        description="Merge revcom.parquet.enc, affiliation_identified.xlsx, and srcities.csv into encrypted metadata.parquet.enc"
     )
     parser.add_argument("--revcom-input", default=DEFAULT_REVCOM_INPUT, help=f"Encrypted parquet input (default: {DEFAULT_REVCOM_INPUT})")
     parser.add_argument("--affiliation-input", default=DEFAULT_AFFILIATION_INPUT, help=f"Affiliation Excel input (default: {DEFAULT_AFFILIATION_INPUT})")
+    parser.add_argument("--srcities-input", default=DEFAULT_SRCITIES_INPUT, help=f"SRCities CSV input (default: {DEFAULT_SRCITIES_INPUT})")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help=f"Encrypted output file (default: {DEFAULT_OUTPUT})")
     parser.add_argument("--key-env", default=DEFAULT_KEY_ENV, help=f"Fernet key env var (default: {DEFAULT_KEY_ENV})")
     return parser.parse_args()
@@ -123,6 +125,7 @@ def main() -> None:
 
     revcom_df = decrypt_parquet_to_dataframe(Path(args.revcom_input), args.key_env)
     affiliation_df = pd.read_excel(Path(args.affiliation_input))
+    srcities_df = pd.read_csv(Path(args.srcities_input))
 
     revcom_id = _find_id_column(list(revcom_df.columns))
     affiliation_id = _find_id_column(list(affiliation_df.columns))
@@ -164,6 +167,24 @@ def main() -> None:
         )
         if affiliation_id in merged.columns and affiliation_id not in revcom_df.columns:
             merged = merged.drop(columns=[affiliation_id])
+
+    srcities_id = _find_id_column(list(srcities_df.columns))
+    srcities_isfp_col = None
+    for col in srcities_df.columns:
+        normalized = col.strip().lower()
+        if normalized == "isfp" or normalized.startswith("isfp") or "isfp" in normalized:
+            srcities_isfp_col = col
+            break
+    if not srcities_isfp_col:
+        raise KeyError("No isfp column found in srcities input.")
+    merged = merged.merge(
+        srcities_df[[srcities_id, srcities_isfp_col]].rename(columns={srcities_isfp_col: "isfp"}),
+        how="left",
+        left_on=revcom_id,
+        right_on=srcities_id,
+    )
+    if srcities_id in merged.columns and srcities_id != revcom_id:
+        merged = merged.drop(columns=[srcities_id])
 
     out_path = encrypt_dataframe_to_parquet(merged, Path(args.output), args.key_env)
 
