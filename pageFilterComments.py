@@ -252,7 +252,10 @@ def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFr
             if selected_tokens:
                 out = out[
                     out["spm_section_number"].fillna("").astype(str).apply(
-                        lambda x: _section_tokens_from_value(x) == selected_tokens
+                        lambda x: (
+                            bool(_section_tokens_from_value(x))
+                            and _section_tokens_from_value(x).issubset(selected_tokens)
+                        )
                     )
                 ]
     if nfp:
