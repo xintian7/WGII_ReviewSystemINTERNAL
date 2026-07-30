@@ -15,6 +15,8 @@ PAGE_SIZE_OPTIONS = [5, 10, 20, 50]
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_COMMENT_SEARCH = "applicab*"
 FERNET_KEY_ENV = "FERNET_KEY"
+SPM_CHAPTER = "Summary for Policymakers"
+SPM_SECTION_UI_OPTIONS = ["Introduction", "A", "B", "C", "D", "The whole SPM"]
 EXPORT_EXCLUDED_COLUMNS = [
     "res_p1",
     "res_p2",
@@ -78,6 +80,14 @@ def _metadata_candidates() -> list[Path]:
     ]
 
 
+def _metadata_cache_key() -> str:
+    enc_path = next((p for p in _metadata_candidates() if p.exists()), None)
+    if enc_path is None:
+        return "missing"
+    stat = enc_path.stat()
+    return f"{enc_path}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
 def _env_candidates() -> list[Path]:
     base_dir = Path(__file__).resolve().parent
     return [
@@ -119,7 +129,7 @@ def _build_fernet_from_value(raw_key: str) -> Fernet:
 
 
 @st.cache_data(show_spinner=False)
-def _load_metadata_dataframe() -> pd.DataFrame:
+def _load_metadata_dataframe(_cache_key: str = "") -> pd.DataFrame:
     if not os.getenv(FERNET_KEY_ENV):
         for env_path in _env_candidates():
             _load_env_file_if_present(env_path)
@@ -191,41 +201,35 @@ def _compute_page_tokens(total_pages: int, current_page: int) -> list[int | str]
     return tokens
 
 
-def _find_section_column(df: pd.DataFrame) -> str | None:
-    lower_name_map = {str(c).strip().lower(): str(c) for c in df.columns}
-    prioritized = [
-        "section",
-        "sections",
-        "subsection",
-        "subsections",
-        "chapter_section",
-        "chapter_sections",
-        "chapter subsection",
-        "chapter_subsection",
-        "chapter sub-section",
-        "chapter_subsections",
-    ]
-    for candidate in prioritized:
-        if candidate in lower_name_map:
-            return lower_name_map[candidate]
-
-    fallback_cols = [
-        str(c)
-        for c in df.columns
-        if "section" in str(c).strip().lower() and str(c).strip().lower() != "intersection"
-    ]
-    return fallback_cols[0] if fallback_cols else None
+def _is_spm_only_selected(chapters: list[str]) -> bool:
+    cleaned = [str(x).strip() for x in chapters if str(x).strip()]
+    return len(cleaned) == 1 and cleaned[0] == SPM_CHAPTER
 
 
-def _get_available_sections(df: pd.DataFrame, section_col: str, chapters: list[str]) -> list[str]:
-    section_source = df[df["chapter"].isin(chapters)] if chapters else df.iloc[0:0]
-    return sorted(
-        [
-            x
-            for x in section_source[section_col].dropna().astype(str).unique().tolist()
-            if x
-        ]
-    )
+def _get_spm_section_options(df: pd.DataFrame) -> list[str]:
+    if "spm_section_number" not in df.columns:
+        return []
+    return SPM_SECTION_UI_OPTIONS.copy()
+
+
+def _section_tokens_from_value(value: str) -> set[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    return {tok.strip() for tok in raw.split("|") if tok.strip()}
+
+
+def _selected_spm_tokens(selected_sections: list[str]) -> set[str]:
+    out: set[str] = set()
+    for section in selected_sections:
+        s = str(section).strip()
+        if not s:
+            continue
+        if s == "The whole SPM":
+            out.add("full")
+        else:
+            out.add(s)
+    return out
 
 
 def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFrame:
@@ -243,9 +247,14 @@ def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFr
     if chapters:
         out = out[out["chapter"].isin(chapters)]
     if sections:
-        section_col = _find_section_column(out)
-        if section_col and section_col in out.columns:
-            out = out[out[section_col].fillna("").astype(str).isin(sections)]
+        if _is_spm_only_selected(chapters) and "spm_section_number" in out.columns:
+            selected_tokens = _selected_spm_tokens(sections)
+            if selected_tokens:
+                out = out[
+                    out["spm_section_number"].fillna("").astype(str).apply(
+                        lambda x: _section_tokens_from_value(x) == selected_tokens
+                    )
+                ]
     if nfp:
         isfp_numeric = pd.to_numeric(out["isfp"], errors="coerce")
         if nfp == "yes":
@@ -375,6 +384,7 @@ def _render_card(row: pd.Series, comment_keyword: str = "") -> None:
     nfp = html.escape(nfp)
     action = html.escape(str(row.get("Action", "")))
     commentid = html.escape(str(row.get("commentid", "")))
+    spm_section = html.escape(str(row.get("spm_section_number", "")).strip())
     frompage = html.escape(str(row.get("frompage", "")))
     topage = html.escape(str(row.get("topage", "")))
     reviewer = html.escape(
@@ -388,7 +398,7 @@ def _render_card(row: pd.Series, comment_keyword: str = "") -> None:
             <div class="review-row"><span class="review-label">Chapter:</span> {chapter}</div>
             <div class="review-row"><span class="review-label">Category:</span> {category} | <span class="review-label">Subcategory (LLM-generated, Reference only):</span> {subcategory}</div>
             <div class="review-row"><span class="review-label">Action (LLM-generated, Reference only):</span> {action}</div>
-            <div class="review-row"><span class="review-label">Page Range:</span> {frompage} - {topage} | <span class="review-label">Comment ID:</span> {commentid}</div>
+            <div class="review-row"><span class="review-label">Page Range:</span> {frompage} - {topage} | <span class="review-label">Comment ID:</span> {commentid} | <span class="review-label">SPM Section:</span> {spm_section}</div>
             <div class="review-row"><span class="review-label">Affiliation:</span> {affiliation}</div>
             <div class="review-row"><span class="review-label">Affilation Type (LLM-generated, Reference only):</span> {aff_type}</div>
             <div class="review-row"><span class="review-label">Reviewer:</span> {reviewer} | <span class="review-label">Country:</span> {country} | <span class="review-label">National Focal Point:</span> {nfp}</div>
@@ -594,7 +604,7 @@ def render_comment_analysis_tab() -> None:
     st.markdown("# Filter Comments")
 
     try:
-        df = _load_metadata_dataframe()
+        df = _load_metadata_dataframe(_metadata_cache_key())
     except Exception as exc:
         st.error(f"Failed to load metadata: {exc}")
         return
@@ -603,34 +613,36 @@ def render_comment_analysis_tab() -> None:
     categories = sorted([x for x in df["category"].dropna().astype(str).unique().tolist() if x])
     subcategories = sorted([x for x in df["subcategory"].dropna().astype(str).unique().tolist() if x])
     aff_types = sorted([x for x in df["primary_result_after_gpt"].dropna().astype(str).unique().tolist() if x])
-    section_col = _find_section_column(df)
 
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
         selected_chapters = st.multiselect("Chapters", options=chapters, default=[], key="filter_chapters")
     with row1_col2:
-        if section_col:
-            available_sections = _get_available_sections(df, section_col, selected_chapters)
+        spm_only_selected = _is_spm_only_selected(selected_chapters)
+        if spm_only_selected:
+            available_sections = _get_spm_section_options(df)
             existing_sections = st.session_state.get("filter_sections", [])
             if existing_sections:
                 st.session_state["filter_sections"] = [x for x in existing_sections if x in available_sections]
 
             selected_sections = st.multiselect(
-                "(Sub)sections",
+                "SPM (sub)sections",
                 options=available_sections,
                 default=[],
                 key="filter_sections",
-                disabled=not selected_chapters,
-                help="Select chapter(s) first to load corresponding (sub)sections.",
+                disabled=False,
+                help="Available only when Chapters is set to Summary for Policymakers.",
             )
         else:
+            if st.session_state.get("filter_sections"):
+                st.session_state["filter_sections"] = []
             st.multiselect(
-                "(Sub)sections",
+                "SPM (sub)sections",
                 options=[],
                 default=[],
                 key="filter_sections",
                 disabled=True,
-                help="No section/subsection column was found in metadata.",
+                help="Enable this by selecting only Summary for Policymakers in Chapters.",
             )
             selected_sections = []
 
