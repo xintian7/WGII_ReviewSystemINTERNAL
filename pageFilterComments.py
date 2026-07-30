@@ -33,6 +33,7 @@ EXPORT_EXCLUDED_COLUMNS = [
 def _initial_applied_filters() -> dict[str, object]:
     return {
         "chapters": [],
+        "sections": [],
         "nfp": "",
         "categories": [],
         "subcategories": [],
@@ -48,6 +49,7 @@ def _reset_comment_analysis_state() -> None:
     st.session_state["review_page_size"] = DEFAULT_PAGE_SIZE
     st.session_state["review_applied_filters"] = {
         "chapters": [],
+        "sections": [],
         "nfp": "",
         "categories": [],
         "subcategories": [],
@@ -57,6 +59,7 @@ def _reset_comment_analysis_state() -> None:
     }
 
     st.session_state["filter_chapters"] = []
+    st.session_state["filter_sections"] = []
     st.session_state["filter_nfp"] = ""
     st.session_state["filter_aff_types"] = []
     st.session_state["filter_categories"] = []
@@ -188,10 +191,48 @@ def _compute_page_tokens(total_pages: int, current_page: int) -> list[int | str]
     return tokens
 
 
+def _find_section_column(df: pd.DataFrame) -> str | None:
+    lower_name_map = {str(c).strip().lower(): str(c) for c in df.columns}
+    prioritized = [
+        "section",
+        "sections",
+        "subsection",
+        "subsections",
+        "chapter_section",
+        "chapter_sections",
+        "chapter subsection",
+        "chapter_subsection",
+        "chapter sub-section",
+        "chapter_subsections",
+    ]
+    for candidate in prioritized:
+        if candidate in lower_name_map:
+            return lower_name_map[candidate]
+
+    fallback_cols = [
+        str(c)
+        for c in df.columns
+        if "section" in str(c).strip().lower() and str(c).strip().lower() != "intersection"
+    ]
+    return fallback_cols[0] if fallback_cols else None
+
+
+def _get_available_sections(df: pd.DataFrame, section_col: str, chapters: list[str]) -> list[str]:
+    section_source = df[df["chapter"].isin(chapters)] if chapters else df.iloc[0:0]
+    return sorted(
+        [
+            x
+            for x in section_source[section_col].dropna().astype(str).unique().tolist()
+            if x
+        ]
+    )
+
+
 def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFrame:
     out = df.copy()
 
     chapters = list(filters.get("chapters", []))
+    sections = list(filters.get("sections", []))
     nfp = str(filters.get("nfp", "")).strip().lower()
     categories = list(filters.get("categories", []))
     subcategories = list(filters.get("subcategories", []))
@@ -201,6 +242,10 @@ def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFr
 
     if chapters:
         out = out[out["chapter"].isin(chapters)]
+    if sections:
+        section_col = _find_section_column(out)
+        if section_col and section_col in out.columns:
+            out = out[out[section_col].fillna("").astype(str).isin(sections)]
     if nfp:
         isfp_numeric = pd.to_numeric(out["isfp"], errors="coerce")
         if nfp == "yes":
@@ -346,7 +391,7 @@ def _render_card(row: pd.Series, comment_keyword: str = "") -> None:
             <div class="review-row"><span class="review-label">Page Range:</span> {frompage} - {topage} | <span class="review-label">Comment ID:</span> {commentid}</div>
             <div class="review-row"><span class="review-label">Affiliation:</span> {affiliation}</div>
             <div class="review-row"><span class="review-label">Affilation Type (LLM-generated, Reference only):</span> {aff_type}</div>
-            <div class="review-row"><span class="review-label">Reviewer:</span> {reviewer} | <span class="review-label">Country:</span> {country} | <span class="review-label">NFP:</span> {nfp}</div>
+            <div class="review-row"><span class="review-label">Reviewer:</span> {reviewer} | <span class="review-label">Country:</span> {country} | <span class="review-label">National Focal Point:</span> {nfp}</div>
             <div class="review-row"><span class="review-label">Comment:</span> {comment}</div>
         </div>
         """,
@@ -558,25 +603,49 @@ def render_comment_analysis_tab() -> None:
     categories = sorted([x for x in df["category"].dropna().astype(str).unique().tolist() if x])
     subcategories = sorted([x for x in df["subcategory"].dropna().astype(str).unique().tolist() if x])
     aff_types = sorted([x for x in df["primary_result_after_gpt"].dropna().astype(str).unique().tolist() if x])
+    section_col = _find_section_column(df)
 
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
         selected_chapters = st.multiselect("Chapters", options=chapters, default=[], key="filter_chapters")
     with row1_col2:
-        selected_aff_types = st.multiselect(
-            "Affilation type (LLM-categoried)", options=aff_types, default=[], key="filter_aff_types"
-        )
+        if section_col:
+            available_sections = _get_available_sections(df, section_col, selected_chapters)
+            existing_sections = st.session_state.get("filter_sections", [])
+            if existing_sections:
+                st.session_state["filter_sections"] = [x for x in existing_sections if x in available_sections]
 
-    row_nfp_col1, row_nfp_col2 = st.columns(2)
-    with row_nfp_col1:
-        selected_nfp = st.selectbox("NFP", options=["", "Yes", "No"], key="filter_nfp")
-    with row_nfp_col2:
-        st.write("")
+            selected_sections = st.multiselect(
+                "(Sub)sections",
+                options=available_sections,
+                default=[],
+                key="filter_sections",
+                disabled=not selected_chapters,
+                help="Select chapter(s) first to load corresponding (sub)sections.",
+            )
+        else:
+            st.multiselect(
+                "(Sub)sections",
+                options=[],
+                default=[],
+                key="filter_sections",
+                disabled=True,
+                help="No section/subsection column was found in metadata.",
+            )
+            selected_sections = []
 
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
         selected_categories = st.multiselect("Categories", options=categories, default=[], key="filter_categories")
     with row2_col2:
+        selected_aff_types = st.multiselect(
+            "Affilation type (LLM-categoried)", options=aff_types, default=[], key="filter_aff_types"
+        )
+
+    row3_col1, row3_col2 = st.columns(2)
+    with row3_col1:
+        selected_nfp = st.selectbox("National Focal Point", options=["", "Yes", "No"], key="filter_nfp")
+    with row3_col2:
         if selected_categories:
             available_subcategories = sorted(
                 [
@@ -602,28 +671,28 @@ def render_comment_analysis_tab() -> None:
             "Subcategories (LLM-generated)", options=available_subcategories, default=[], key="filter_subcategories"
         )
 
-    row3_col1, row3_col2 = st.columns(2)
-    with row3_col1:
+    row4_col1, row4_col2 = st.columns(2)
+    with row4_col1:
         search_comments = st.text_input("Search in comments", key="filter_search_comments")
-    with row3_col2:
+    with row4_col2:
         search_aff_country = st.text_input(
             "Search in affiliations and countries", key="filter_search_aff_country"
         )
 
-    row4_col1, row4_col2 = st.columns(2)
-    with row4_col1:
-        st.text_input("Containing URL for reference", value="Under Construction", disabled=True)
-    with row4_col2:
-        st.text_input("Enable LLM summarization", value="Under Construction", disabled=True)
-
     row5_col1, row5_col2 = st.columns(2)
     with row5_col1:
+        st.text_input("Containing URL for reference", value="Under Construction", disabled=True)
+    with row5_col2:
+        st.text_input("Enable LLM summarization", value="Under Construction", disabled=True)
+
+    row6_col1, row6_col2 = st.columns(2)
+    with row6_col1:
         page_size = st.selectbox(
             "Comments per page",
             options=PAGE_SIZE_OPTIONS,
             index=PAGE_SIZE_OPTIONS.index(st.session_state["review_page_size"]),
         )
-    with row5_col2:
+    with row6_col2:
         st.write("")
 
     action_cols = st.columns([1, 1, 1, 5], gap="small")
@@ -639,6 +708,7 @@ def render_comment_analysis_tab() -> None:
     if apply_clicked:
         st.session_state["review_applied_filters"] = {
             "chapters": selected_chapters,
+            "sections": selected_sections,
             "nfp": selected_nfp,
             "categories": selected_categories,
             "subcategories": selected_subcategories,
