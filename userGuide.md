@@ -10,7 +10,7 @@ Visit: https://wg2revcom.streamlit.app/
 
 Notes:
 
-- This password is specific to you. I will create passwords for Co-Chairs and TSU colleagues later.
+- This password is specific to you. I will create passwords for everyone.
 - Access control may include different user rights/permissions in later versions.
 
 ## 3. Use Filter Comments
