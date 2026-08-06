@@ -278,15 +278,35 @@ def _filter_dataframe(df: pd.DataFrame, filters: dict[str, object]) -> pd.DataFr
     if aff_country_search:
         aff_text = out["affiliation"].fillna("").astype(str).str.lower()
         country_text = out["country"].fillna("").astype(str).str.lower()
-        out = out[_build_boolean_mask(aff_text, aff_country_search) | _build_boolean_mask(country_text, aff_country_search)]
+        reviewer_first = out["reviewerfirstname"].fillna("").astype(str).str.lower()
+        reviewer_last = out["reviewerlastname"].fillna("").astype(str).str.lower()
+        reviewer_full = (reviewer_first.str.strip() + " " + reviewer_last.str.strip()).str.strip()
+        out = out[
+            _build_boolean_mask(aff_text, aff_country_search)
+            | _build_boolean_mask(country_text, aff_country_search)
+            | _build_boolean_mask(reviewer_first, aff_country_search)
+            | _build_boolean_mask(reviewer_last, aff_country_search)
+            | _build_boolean_mask(reviewer_full, aff_country_search)
+        ]
 
     return out.reset_index(drop=True)
 
 
 def _term_to_regex(term: str) -> str:
-    t = str(term or "")
+    t = str(term or "").strip()
     if not t:
         return ""
+
+    # Quoted terms are treated as exact tokens/phrases and should not match inside larger words.
+    if len(t) >= 2 and t.startswith('"') and t.endswith('"'):
+        inner = t[1:-1]
+        if not inner:
+            return ""
+        escaped = re.escape(inner)
+        left_boundary = r"(?<![A-Za-z0-9_])" if re.match(r"\w", inner[0]) else ""
+        right_boundary = r"(?![A-Za-z0-9_])" if re.search(r"\w$", inner) else ""
+        return f"{left_boundary}{escaped}{right_boundary}"
+
     if re.fullmatch(r"\*+", t):
         return r".+"
     return re.escape(t).replace(r"\*", r".*")
@@ -691,7 +711,7 @@ def render_comment_analysis_tab() -> None:
         search_comments = st.text_input("Search in comments", key="filter_search_comments")
     with row4_col2:
         search_aff_country = st.text_input(
-            "Search in affiliations and countries", key="filter_search_aff_country"
+            "Search in names, affiliations, and countries", key="filter_search_aff_country"
         )
 
     row5_col1, row5_col2 = st.columns(2)
