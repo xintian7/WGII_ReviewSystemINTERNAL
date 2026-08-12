@@ -31,6 +31,78 @@ EXPORT_EXCLUDED_COLUMNS = [
     "gpt_unknown_types",
 ]
 
+DEFAULT_REQUIRED_COLUMNS = [
+    "commentid",
+    "chapter",
+    "category",
+    "subcategory",
+    "isfp",
+    "primary_result_after_gpt",
+    "comment",
+    "affiliation",
+    "country",
+    "reviewerfirstname",
+    "reviewerlastname",
+    "Action",
+    "frompage",
+    "topage",
+]
+
+CANONICAL_COLUMN_ALIASES = {
+    "commentid": ["commentid", "comment_id"],
+    "chapter": ["chapter"],
+    "category": ["category"],
+    "subcategory": ["subcategory"],
+    "isfp": ["isfp", "nationalfocalpoint", "nfp"],
+    "primary_result_after_gpt": [
+        "primaryresultaftergpt",
+        "affiliationtype",
+        "affiliationtypegpt",
+    ],
+    "comment": ["comment", "comments"],
+    "affiliation": ["affiliation", "institution"],
+    "country": ["country"],
+    "reviewerfirstname": ["reviewerfirstname", "firstname", "reviewerfirst"],
+    "reviewerlastname": ["reviewerlastname", "lastname", "reviewerlast"],
+    "Action": ["action", "categoryofresponse", "responsecategory", "reponsetocomments", "responsetocomments"],
+    "frompage": ["frompage", "pagefrom"],
+    "topage": ["topage", "pageto"],
+}
+
+
+def _state_key(prefix: str, key: str) -> str:
+    p = str(prefix or "review").strip()
+    return f"{p}_{key}"
+
+
+def _normalize_token(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
+def _apply_canonical_column_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    renamed = df.copy()
+
+    normalized_to_actual: dict[str, str] = {}
+    for col in renamed.columns:
+        token = _normalize_token(col)
+        if token and token not in normalized_to_actual:
+            normalized_to_actual[token] = col
+
+    rename_map: dict[str, str] = {}
+    for canonical, alias_tokens in CANONICAL_COLUMN_ALIASES.items():
+        if canonical in renamed.columns:
+            continue
+        for alias in alias_tokens:
+            actual = normalized_to_actual.get(_normalize_token(alias))
+            if actual and actual not in rename_map:
+                rename_map[actual] = canonical
+                break
+
+    if rename_map:
+        renamed = renamed.rename(columns=rename_map)
+
+    return renamed
+
 
 def _initial_applied_filters() -> dict[str, object]:
     return {
@@ -45,11 +117,11 @@ def _initial_applied_filters() -> dict[str, object]:
     }
 
 
-def _reset_comment_analysis_state() -> None:
-    st.session_state["review_show_comments"] = False
-    st.session_state["review_page_index"] = 0
-    st.session_state["review_page_size"] = DEFAULT_PAGE_SIZE
-    st.session_state["review_applied_filters"] = {
+def _reset_comment_analysis_state(prefix: str = "review", default_chapter: str | None = None) -> None:
+    st.session_state[_state_key(prefix, "show_comments")] = False
+    st.session_state[_state_key(prefix, "page_index")] = 0
+    st.session_state[_state_key(prefix, "page_size")] = DEFAULT_PAGE_SIZE
+    st.session_state[_state_key(prefix, "applied_filters")] = {
         "chapters": [],
         "sections": [],
         "nfp": "",
@@ -60,28 +132,29 @@ def _reset_comment_analysis_state() -> None:
         "aff_country_search": "",
     }
 
-    st.session_state["filter_chapters"] = []
-    st.session_state["filter_sections"] = []
-    st.session_state["filter_nfp"] = ""
-    st.session_state["filter_aff_types"] = []
-    st.session_state["filter_categories"] = []
-    st.session_state["filter_subcategories"] = []
-    st.session_state["filter_search_comments"] = ""
-    st.session_state["filter_search_aff_country"] = ""
+    st.session_state[_state_key(prefix, "filter_chapters")] = [default_chapter] if default_chapter else []
+    st.session_state[_state_key(prefix, "filter_sections")] = []
+    st.session_state[_state_key(prefix, "filter_nfp")] = ""
+    st.session_state[_state_key(prefix, "filter_aff_types")] = []
+    st.session_state[_state_key(prefix, "filter_categories")] = []
+    st.session_state[_state_key(prefix, "filter_subcategories")] = []
+    st.session_state[_state_key(prefix, "filter_search_comments")] = ""
+    st.session_state[_state_key(prefix, "filter_search_aff_country")] = ""
+    st.session_state[_state_key(prefix, "chapter_default_applied")] = bool(default_chapter)
 
 
-def _metadata_candidates() -> list[Path]:
+def _encrypted_candidates(file_name: str) -> list[Path]:
     base_dir = Path(__file__).resolve().parent
     return [
-        Path("data/metadata.parquet.enc"),
-        Path("metadata.parquet.enc"),
-        base_dir / "data/metadata.parquet.enc",
-        base_dir / "metadata.parquet.enc",
+        Path(f"data/{file_name}"),
+        Path(file_name),
+        base_dir / "data" / file_name,
+        base_dir / file_name,
     ]
 
 
-def _metadata_cache_key() -> str:
-    enc_path = next((p for p in _metadata_candidates() if p.exists()), None)
+def _encrypted_cache_key(file_name: str) -> str:
+    enc_path = next((p for p in _encrypted_candidates(file_name) if p.exists()), None)
     if enc_path is None:
         return "missing"
     stat = enc_path.stat()
@@ -129,7 +202,7 @@ def _build_fernet_from_value(raw_key: str) -> Fernet:
 
 
 @st.cache_data(show_spinner=False)
-def _load_metadata_dataframe(_cache_key: str = "") -> pd.DataFrame:
+def _load_encrypted_dataframe(file_name: str, _cache_key: str = "") -> pd.DataFrame:
     if not os.getenv(FERNET_KEY_ENV):
         for env_path in _env_candidates():
             _load_env_file_if_present(env_path)
@@ -140,43 +213,29 @@ def _load_metadata_dataframe(_cache_key: str = "") -> pd.DataFrame:
     if not key:
         raise RuntimeError(f"Missing key in environment variable: {FERNET_KEY_ENV}")
 
-    enc_path = next((p for p in _metadata_candidates() if p.exists()), None)
+    enc_path = next((p for p in _encrypted_candidates(file_name) if p.exists()), None)
     if enc_path is None:
-        raise FileNotFoundError("metadata.parquet.enc not found in data/ or project root.")
+        raise FileNotFoundError(f"{file_name} not found in data/ or project root.")
 
     encrypted = enc_path.read_bytes()
     parquet_bytes = _build_fernet_from_value(key).decrypt(encrypted)
     df = pd.read_parquet(io.BytesIO(parquet_bytes))
+    df = _apply_canonical_column_aliases(df)
 
-    for col in [
-        "commentid",
-        "chapter",
-        "category",
-        "subcategory",
-        "isfp",
-        "primary_result_after_gpt",
-        "comment",
-        "affiliation",
-        "country",
-        "reviewerfirstname",
-        "reviewerlastname",
-        "Action",
-        "frompage",
-        "topage",
-    ]:
+    for col in DEFAULT_REQUIRED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
 
     return df
 
 
-def _init_state() -> None:
+def _init_state(prefix: str = "review") -> None:
     defaults = {
-        "review_show_comments": False,
-        "review_page_index": 0,
-        "review_page_size": DEFAULT_PAGE_SIZE,
-        "review_applied_filters": _initial_applied_filters(),
-        "filter_search_comments": DEFAULT_COMMENT_SEARCH,
+        _state_key(prefix, "show_comments"): False,
+        _state_key(prefix, "page_index"): 0,
+        _state_key(prefix, "page_size"): DEFAULT_PAGE_SIZE,
+        _state_key(prefix, "applied_filters"): _initial_applied_filters(),
+        _state_key(prefix, "filter_search_comments"): DEFAULT_COMMENT_SEARCH,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -432,21 +491,21 @@ def _render_card(row: pd.Series, comment_keyword: str = "") -> None:
     )
 
 
-def _render_results(filtered: pd.DataFrame, comment_keyword: str = "") -> None:
+def _render_results(filtered: pd.DataFrame, comment_keyword: str = "", prefix: str = "review") -> None:
     total_filtered = len(filtered)
     if total_filtered == 0:
         st.warning("Filtered results: 0")
         return
 
-    page_size = int(st.session_state.get("review_page_size", DEFAULT_PAGE_SIZE))
+    page_size = int(st.session_state.get(_state_key(prefix, "page_size"), DEFAULT_PAGE_SIZE))
     if page_size not in PAGE_SIZE_OPTIONS:
         page_size = DEFAULT_PAGE_SIZE
-        st.session_state["review_page_size"] = page_size
+        st.session_state[_state_key(prefix, "page_size")] = page_size
 
     total_pages = max(1, (total_filtered + page_size - 1) // page_size)
-    page_index = int(st.session_state.get("review_page_index", 0))
+    page_index = int(st.session_state.get(_state_key(prefix, "page_index"), 0))
     page_index = max(0, min(page_index, total_pages - 1))
-    st.session_state["review_page_index"] = page_index
+    st.session_state[_state_key(prefix, "page_index")] = page_index
 
     start = page_index * page_size
     end = min(start + page_size, total_filtered)
@@ -466,31 +525,37 @@ def _render_results(filtered: pd.DataFrame, comment_keyword: str = "") -> None:
             if item == "prev":
                 if st.button(
                     "‹",
-                    key="review_prev_page",
+                    key=_state_key(prefix, "prev_page"),
                     disabled=page_index == 0,
                     type="secondary",
                     use_container_width=False,
                 ):
-                    st.session_state["review_page_index"] = max(0, page_index - 1)
+                    st.session_state[_state_key(prefix, "page_index")] = max(0, page_index - 1)
                     st.rerun()
             elif item == "next":
                 if st.button(
                     "›",
-                    key="review_next_page",
+                    key=_state_key(prefix, "next_page"),
                     disabled=page_index >= total_pages - 1,
                     type="secondary",
                     use_container_width=False,
                 ):
-                    st.session_state["review_page_index"] = min(total_pages - 1, page_index + 1)
+                    st.session_state[_state_key(prefix, "page_index")] = min(total_pages - 1, page_index + 1)
                     st.rerun()
             elif item == "...":
-                st.button("…", key=f"review_gap_{idx}", disabled=True, type="secondary", use_container_width=False)
+                st.button(
+                    "…",
+                    key=_state_key(prefix, f"gap_{idx}"),
+                    disabled=True,
+                    type="secondary",
+                    use_container_width=False,
+                )
             else:
                 is_current = item == (page_index + 1)
                 if is_current:
                     st.button(
                         str(item),
-                        key=f"review_page_current_{item}",
+                        key=_state_key(prefix, f"page_current_{item}"),
                         disabled=False,
                         type="primary",
                         use_container_width=False,
@@ -498,11 +563,11 @@ def _render_results(filtered: pd.DataFrame, comment_keyword: str = "") -> None:
                 else:
                     if st.button(
                         str(item),
-                        key=f"review_page_{item}",
+                        key=_state_key(prefix, f"page_{item}"),
                         type="secondary",
                         use_container_width=False,
                     ):
-                        st.session_state["review_page_index"] = int(item) - 1
+                        st.session_state[_state_key(prefix, "page_index")] = int(item) - 1
                         st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -511,8 +576,16 @@ def _render_results(filtered: pd.DataFrame, comment_keyword: str = "") -> None:
         _render_card(row, comment_keyword=comment_keyword)
 
 
-def render_comment_analysis_tab() -> None:
-    _init_state()
+def _render_comment_analysis_base(
+    *,
+    title: str,
+    source_file_name: str,
+    state_prefix: str,
+    export_file_name: str,
+    disable_nfp_filter: bool = False,
+    default_to_first_chapter: bool = False,
+) -> None:
+    _init_state(state_prefix)
 
     st.markdown(
         """
@@ -541,8 +614,8 @@ def render_comment_analysis_tab() -> None:
         }
 
         /* Hide "Press Enter to apply" for the two search fields only. */
-        .st-key-filter_search_comments [data-testid="InputInstructions"],
-        .st-key-filter_search_aff_country [data-testid="InputInstructions"] {
+        .st-key-__PREFIX___filter_search_comments [data-testid="InputInstructions"],
+        .st-key-__PREFIX___filter_search_aff_country [data-testid="InputInstructions"] {
             display: none !important;
         }
 
@@ -558,11 +631,11 @@ def render_comment_analysis_tab() -> None:
             padding-right: 1px !important;
         }
 
-        .st-key-review_prev_page button,
-        .st-key-review_next_page button,
-        div[class*="st-key-review_gap_"] button,
-        div[class*="st-key-review_page_"] button,
-        div[class*="st-key-review_page_current_"] button {
+        .st-key-__PREFIX___prev_page button,
+        .st-key-__PREFIX___next_page button,
+        div[class*="st-key-__PREFIX___gap_"] button,
+        div[class*="st-key-__PREFIX___page_"] button,
+        div[class*="st-key-__PREFIX___page_current_"] button {
             width: 30px !important;
             min-width: 30px !important;
             max-width: 30px !important;
@@ -581,37 +654,37 @@ def render_comment_analysis_tab() -> None:
         }
 
         /* Inactive buttons: secondary */
-        .st-key-review_prev_page button,
-        .st-key-review_next_page button,
-        div[class*="st-key-review_page_"] button,
-        div[class*="st-key-review_gap_"] button {
+        .st-key-__PREFIX___prev_page button,
+        .st-key-__PREFIX___next_page button,
+        div[class*="st-key-__PREFIX___page_"] button,
+        div[class*="st-key-__PREFIX___gap_"] button {
             background-color: #A3A3A3 !important;
             border: 1px solid #A3A3A3 !important;
             color: #FFFFFF !important;
         }
-        .st-key-review_prev_page button:hover,
-        .st-key-review_next_page button:hover,
-        div[class*="st-key-review_page_"] button:hover {
+        .st-key-__PREFIX___prev_page button:hover,
+        .st-key-__PREFIX___next_page button:hover,
+        div[class*="st-key-__PREFIX___page_"] button:hover {
             background-color: #8A8A8A !important;
             border-color: #8A8A8A !important;
         }
 
         /* Active page: primary */
-        div[class*="st-key-review_page_current_"] button {
+        div[class*="st-key-__PREFIX___page_current_"] button {
             background-color: #1F77B4 !important;
             border: 1px solid #1F77B4 !important;
             color: #FFFFFF !important;
             font-weight: 700 !important;
         }
-        div[class*="st-key-review_page_current_"] button:hover {
+        div[class*="st-key-__PREFIX___page_current_"] button:hover {
             background-color: #166AA3 !important;
             border-color: #166AA3 !important;
         }
 
         /* Disabled controls: gray and non-interactive. */
-        .st-key-review_prev_page button:disabled,
-        .st-key-review_next_page button:disabled,
-        div[class*="st-key-review_gap_"] button:disabled {
+        .st-key-__PREFIX___prev_page button:disabled,
+        .st-key-__PREFIX___next_page button:disabled,
+        div[class*="st-key-__PREFIX___gap_"] button:disabled {
             background-color: #A3A3A3 !important;
             border-color: #A3A3A3 !important;
             color: #FFFFFF !important;
@@ -619,17 +692,17 @@ def render_comment_analysis_tab() -> None:
             cursor: not-allowed !important;
         }
         </style>
-        """,
+        """.replace("__PREFIX__", state_prefix),
         unsafe_allow_html=True,
     )
 
     st.divider()
-    st.markdown("# Filter Comments")
+    st.markdown(f"# {title}")
 
     try:
-        df = _load_metadata_dataframe(_metadata_cache_key())
+        df = _load_encrypted_dataframe(source_file_name, _encrypted_cache_key(source_file_name))
     except Exception as exc:
-        st.error(f"Failed to load metadata: {exc}")
+        st.error(f"Failed to load {source_file_name}: {exc}")
         return
 
     chapters = sorted([x for x in df["chapter"].dropna().astype(str).unique().tolist() if x])
@@ -637,33 +710,50 @@ def render_comment_analysis_tab() -> None:
     subcategories = sorted([x for x in df["subcategory"].dropna().astype(str).unique().tolist() if x])
     aff_types = sorted([x for x in df["primary_result_after_gpt"].dropna().astype(str).unique().tolist() if x])
 
+    chapter_filter_key = _state_key(state_prefix, "filter_chapters")
+    chapter_default_applied_key = _state_key(state_prefix, "chapter_default_applied")
+    default_chapter = chapters[0] if (default_to_first_chapter and chapters) else None
+
+    if default_chapter and not st.session_state.get(chapter_default_applied_key, False):
+        current_chapters = st.session_state.get(chapter_filter_key, [])
+        if not current_chapters:
+            st.session_state[chapter_filter_key] = [default_chapter]
+        st.session_state[chapter_default_applied_key] = True
+
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
-        selected_chapters = st.multiselect("Chapters", options=chapters, default=[], key="filter_chapters")
+        selected_chapters = st.multiselect(
+            "Chapters",
+            options=chapters,
+            default=[],
+            key=chapter_filter_key,
+        )
     with row1_col2:
         spm_only_selected = _is_spm_only_selected(selected_chapters)
         if spm_only_selected:
             available_sections = _get_spm_section_options(df)
-            existing_sections = st.session_state.get("filter_sections", [])
+            existing_sections = st.session_state.get(_state_key(state_prefix, "filter_sections"), [])
             if existing_sections:
-                st.session_state["filter_sections"] = [x for x in existing_sections if x in available_sections]
+                st.session_state[_state_key(state_prefix, "filter_sections")] = [
+                    x for x in existing_sections if x in available_sections
+                ]
 
             selected_sections = st.multiselect(
                 "SPM (sub)sections",
                 options=available_sections,
                 default=[],
-                key="filter_sections",
+                key=_state_key(state_prefix, "filter_sections"),
                 disabled=False,
                 help="Available only when Chapters is set to Summary for Policymakers.",
             )
         else:
-            if st.session_state.get("filter_sections"):
-                st.session_state["filter_sections"] = []
+            if st.session_state.get(_state_key(state_prefix, "filter_sections")):
+                st.session_state[_state_key(state_prefix, "filter_sections")] = []
             st.multiselect(
                 "SPM (sub)sections",
                 options=[],
                 default=[],
-                key="filter_sections",
+                key=_state_key(state_prefix, "filter_sections"),
                 disabled=True,
                 help="Enable this by selecting only Summary for Policymakers in Chapters.",
             )
@@ -671,15 +761,31 @@ def render_comment_analysis_tab() -> None:
 
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
-        selected_categories = st.multiselect("Categories", options=categories, default=[], key="filter_categories")
+        selected_categories = st.multiselect(
+            "Categories",
+            options=categories,
+            default=[],
+            key=_state_key(state_prefix, "filter_categories"),
+        )
     with row2_col2:
         selected_aff_types = st.multiselect(
-            "Affilation type (LLM-categoried)", options=aff_types, default=[], key="filter_aff_types"
+            "Affilation type (LLM-categoried)",
+            options=aff_types,
+            default=[],
+            key=_state_key(state_prefix, "filter_aff_types"),
         )
 
     row3_col1, row3_col2 = st.columns(2)
     with row3_col1:
-        selected_nfp = st.selectbox("National Focal Point", options=["", "Yes", "No"], key="filter_nfp")
+        if disable_nfp_filter and st.session_state.get(_state_key(state_prefix, "filter_nfp"), ""):
+            st.session_state[_state_key(state_prefix, "filter_nfp")] = ""
+        selected_nfp = st.selectbox(
+            "National Focal Point",
+            options=["", "Yes", "No"],
+            key=_state_key(state_prefix, "filter_nfp"),
+            disabled=disable_nfp_filter,
+            help="Not available for FOD-Ch1 data." if disable_nfp_filter else None,
+        )
     with row3_col2:
         if selected_categories:
             available_subcategories = sorted(
@@ -696,22 +802,26 @@ def render_comment_analysis_tab() -> None:
         else:
             available_subcategories = subcategories
 
-        existing_subcategories = st.session_state.get("filter_subcategories", [])
+        existing_subcategories = st.session_state.get(_state_key(state_prefix, "filter_subcategories"), [])
         if existing_subcategories:
-            st.session_state["filter_subcategories"] = [
+            st.session_state[_state_key(state_prefix, "filter_subcategories")] = [
                 x for x in existing_subcategories if x in available_subcategories
             ]
 
         selected_subcategories = st.multiselect(
-            "Subcategories (LLM-generated)", options=available_subcategories, default=[], key="filter_subcategories"
+            "Subcategories (LLM-generated)",
+            options=available_subcategories,
+            default=[],
+            key=_state_key(state_prefix, "filter_subcategories"),
         )
 
     row4_col1, row4_col2 = st.columns(2)
     with row4_col1:
-        search_comments = st.text_input("Search in comments", key="filter_search_comments")
+        search_comments = st.text_input("Search in comments", key=_state_key(state_prefix, "filter_search_comments"))
     with row4_col2:
         search_aff_country = st.text_input(
-            "Search in names, affiliations, and countries", key="filter_search_aff_country"
+            "Search in names, affiliations, and countries",
+            key=_state_key(state_prefix, "filter_search_aff_country"),
         )
 
     row5_col1, row5_col2 = st.columns(2)
@@ -725,23 +835,29 @@ def render_comment_analysis_tab() -> None:
         page_size = st.selectbox(
             "Comments per page",
             options=PAGE_SIZE_OPTIONS,
-            index=PAGE_SIZE_OPTIONS.index(st.session_state["review_page_size"]),
+            index=PAGE_SIZE_OPTIONS.index(st.session_state[_state_key(state_prefix, "page_size")]),
         )
     with row6_col2:
         st.write("")
 
     action_cols = st.columns([1, 1, 1, 5], gap="small")
     with action_cols[0]:
-        apply_clicked = st.button("Apply", type="primary")
+        apply_clicked = st.button("Apply", type="primary", key=_state_key(state_prefix, "apply"))
     with action_cols[1]:
-        st.button("Reset", type="primary", on_click=_reset_comment_analysis_state)
+        st.button(
+            "Reset",
+            type="primary",
+            key=_state_key(state_prefix, "reset"),
+            on_click=_reset_comment_analysis_state,
+            args=(state_prefix, default_chapter),
+        )
 
-    if page_size != st.session_state["review_page_size"]:
-        st.session_state["review_page_size"] = page_size
-        st.session_state["review_page_index"] = 0
+    if page_size != st.session_state[_state_key(state_prefix, "page_size")]:
+        st.session_state[_state_key(state_prefix, "page_size")] = page_size
+        st.session_state[_state_key(state_prefix, "page_index")] = 0
 
     if apply_clicked:
-        st.session_state["review_applied_filters"] = {
+        st.session_state[_state_key(state_prefix, "applied_filters")] = {
             "chapters": selected_chapters,
             "sections": selected_sections,
             "nfp": selected_nfp,
@@ -751,30 +867,55 @@ def render_comment_analysis_tab() -> None:
             "comment_search": search_comments,
             "aff_country_search": search_aff_country,
         }
-        st.session_state["review_page_index"] = 0
-        st.session_state["review_show_comments"] = True
+        st.session_state[_state_key(state_prefix, "page_index")] = 0
+        st.session_state[_state_key(state_prefix, "show_comments")] = True
 
     filtered = pd.DataFrame()
-    if st.session_state["review_show_comments"]:
-        filtered = _filter_dataframe(df, st.session_state["review_applied_filters"])
+    if st.session_state[_state_key(state_prefix, "show_comments")]:
+        filtered = _filter_dataframe(df, st.session_state[_state_key(state_prefix, "applied_filters")])
 
     with action_cols[2]:
-        if st.session_state["review_show_comments"] and not filtered.empty:
+        if st.session_state[_state_key(state_prefix, "show_comments")] and not filtered.empty:
             st.download_button(
                 "Export",
                 data=_dataframe_to_excel_bytes(filtered),
-                file_name="comment_analysis_filtered.xlsx",
+                file_name=export_file_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
+                key=_state_key(state_prefix, "export"),
             )
         else:
-            st.button("Export", type="primary", disabled=True)
+            st.button("Export", type="primary", disabled=True, key=_state_key(state_prefix, "export_disabled"))
     with action_cols[3]:
         st.write("")
 
-    if not st.session_state["review_show_comments"]:
+    if not st.session_state[_state_key(state_prefix, "show_comments")]:
         st.info("Set filters and click Apply to show results.")
         return
 
-    applied_comment_search = str(st.session_state["review_applied_filters"].get("comment_search", ""))
-    _render_results(filtered, comment_keyword=applied_comment_search)
+    applied_comment_search = str(
+        st.session_state[_state_key(state_prefix, "applied_filters")].get("comment_search", "")
+    )
+    _render_results(filtered, comment_keyword=applied_comment_search, prefix=state_prefix)
+
+
+def render_comment_analysis_tab() -> None:
+    _render_comment_analysis_base(
+        title="Filter Comments",
+        source_file_name="metadata.parquet.enc",
+        state_prefix="review",
+        export_file_name="comment_analysis_filtered.xlsx",
+        disable_nfp_filter=False,
+        default_to_first_chapter=False,
+    )
+
+
+def render_fod_ch1_tab() -> None:
+    _render_comment_analysis_base(
+        title="FOD-Ch1",
+        source_file_name="srfodch1.parquet.enc",
+        state_prefix="fodch1",
+        export_file_name="fod_ch1_filtered.xlsx",
+        disable_nfp_filter=True,
+        default_to_first_chapter=True,
+    )

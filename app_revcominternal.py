@@ -1,8 +1,13 @@
 import streamlit as st
 
-from pageFilterComments import render_comment_analysis_tab
+from pageFilterComments import render_comment_analysis_tab, render_fod_ch1_tab
 from pageDevelopmentPlan import render_todo_page
-from pageSetting import initialize_auth_state, is_auth_unlocked, render_setting_page
+from pageSetting import (
+    initialize_auth_state,
+    is_auth_unlocked,
+    render_setting_page,
+    use_ch1_title_variant,
+)
 from pageUserGuide import render_user_guide_page
 
 
@@ -29,6 +34,10 @@ def render_other_apps_page() -> None:
 
 def render_comment_analysis_page() -> None:
     render_comment_analysis_tab()
+
+
+def render_fod_ch1_page() -> None:
+    render_fod_ch1_tab()
 
 
 st.markdown(
@@ -211,15 +220,35 @@ section[data-testid="stSidebar"] hr {
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="main-title">Review Comment Panel<br><span style="font-size:38px;">Internal Use for WGII</span></div>', unsafe_allow_html=True)
-
 if "sidebar_info_section" not in st.session_state:
     st.session_state["sidebar_info_section"] = None
 if "sidebar_main_section" not in st.session_state:
-    st.session_state["sidebar_main_section"] = "comment analysis"
+    st.session_state["sidebar_main_section"] = "setting"
 if "active_panel" not in st.session_state:
-    st.session_state["active_panel"] = "main:comment analysis"
+    st.session_state["active_panel"] = "main:setting"
 initialize_auth_state()
+is_unlocked = is_auth_unlocked()
+
+if not is_unlocked:
+    st.session_state["sidebar_info_section"] = None
+    st.session_state["sidebar_main_section"] = "setting"
+    st.session_state["active_panel"] = "main:setting"
+
+use_ch1_title = is_unlocked and use_ch1_title_variant()
+
+if is_unlocked and use_ch1_title and st.session_state.get("sidebar_main_section") not in {"fod ch1", "setting"}:
+    st.session_state["sidebar_info_section"] = None
+    st.session_state["sidebar_main_section"] = "fod ch1"
+    st.session_state["active_panel"] = "main:fod ch1"
+
+if use_ch1_title:
+    page_title_html = '<div class="main-title">Review Comment Panel</div>'
+    sidebar_title_html = "<span style='color: #00a9cf; font-weight: bold;'>Review Comment Panel</span>"
+else:
+    page_title_html = '<div class="main-title">Review Comment Panel<br><span style="font-size:38px;">Internal Use for WGII</span></div>'
+    sidebar_title_html = "<span style='color: #00a9cf; font-weight: bold;'>Review Comment Panel<br>Internal Use for WGII</span>"
+
+st.markdown(page_title_html, unsafe_allow_html=True)
 
 
 def _on_info_section_change() -> None:
@@ -237,49 +266,70 @@ def _on_main_section_change() -> None:
 
 
 with st.sidebar:
-    st.markdown(
-        "<span style='color: #00a9cf; font-weight: bold;'>Review Comment Panel<br>Internal Use for WGII</span>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("Read information")
-
-    info_icon_map = {
-        "user guide": "User Guide",
-        "to do": "Development Plan",
-    }
-
+    st.markdown(sidebar_title_html, unsafe_allow_html=True)
     main_icon_map = {
         "comment analysis": "Filter Comments",
+        "fod ch1": "FOD-Ch1",
         "setting": "Setting",
     }
 
-    st.radio(
-        "",
-        options=["user guide", "to do"],
-        index=None,
-        key="sidebar_info_section",
-        label_visibility="collapsed",
-        on_change=_on_info_section_change,
-        format_func=lambda label: info_icon_map.get(label, label.title()),
-    )
+    if is_unlocked:
+        if use_ch1_title:
+            st.divider()
+            st.markdown("Review Comment Analysis")
+            st.radio(
+                "",
+                options=["fod ch1", "setting"],
+                index=None,
+                key="sidebar_main_section",
+                label_visibility="collapsed",
+                on_change=_on_main_section_change,
+                format_func=lambda label: main_icon_map.get(label, label.title()),
+            )
+        else:
+            st.markdown("Read information")
 
-    st.divider()
+            info_icon_map = {
+                "user guide": "User Guide",
+                "to do": "Development Plan",
+            }
 
-    st.markdown("Review Comment Analysis (SOD)")
+            st.radio(
+                "",
+                options=["user guide", "to do"],
+                index=None,
+                key="sidebar_info_section",
+                label_visibility="collapsed",
+                on_change=_on_info_section_change,
+                format_func=lambda label: info_icon_map.get(label, label.title()),
+            )
 
-    st.radio(
-        "",
-        options=["comment analysis", "setting"],
-        index=None,
-        key="sidebar_main_section",
-        label_visibility="collapsed",
-        on_change=_on_main_section_change,
-        format_func=lambda label: main_icon_map.get(label, label.title()),
-    )
+            st.divider()
 
-active_panel = st.session_state.get("active_panel", "info:user guide")
+            st.markdown("Review Comment Analysis")
+
+            st.radio(
+                "",
+                options=["comment analysis", "fod ch1", "setting"],
+                index=None,
+                key="sidebar_main_section",
+                label_visibility="collapsed",
+                on_change=_on_main_section_change,
+                format_func=lambda label: main_icon_map.get(label, label.title()),
+            )
+    else:
+        st.markdown("Review Comment Analysis")
+        st.radio(
+            "",
+            options=["setting"],
+            index=0,
+            key="sidebar_main_section",
+            label_visibility="collapsed",
+            format_func=lambda label: main_icon_map.get(label, label.title()),
+        )
+
+active_panel = st.session_state.get("active_panel", "main:setting")
 active_main_section = st.session_state.get("sidebar_main_section")
-is_unlocked = is_auth_unlocked()
 
 if active_main_section == "setting" or active_panel == "main:setting":
     render_setting_page()
@@ -294,6 +344,10 @@ if active_panel == "info:user guide":
 
 if active_panel == "info:to do":
     render_todo_page()
+    st.stop()
+
+if active_main_section == "fod ch1":
+    render_fod_ch1_page()
     st.stop()
 
 if active_main_section == "comment analysis":

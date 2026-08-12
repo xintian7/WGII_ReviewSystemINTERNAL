@@ -14,13 +14,17 @@ def _env_candidates() -> list[Path]:
     ]
 
 
-def _load_env_file_if_present(env_path: Path) -> None:
+def _load_env_file_if_present(env_path: Path, *, overwrite: bool = False) -> None:
     if not env_path.exists() or not env_path.is_file():
         return
 
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
@@ -29,16 +33,14 @@ def _load_env_file_if_present(env_path: Path) -> None:
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
-        if key not in os.environ:
+        if overwrite or key not in os.environ:
             os.environ[key] = value
 
 
 def _get_allowed_passwords() -> list[str]:
-    if not os.getenv("user_pwd") and not os.getenv("USER_PWD"):
-        for env_path in _env_candidates():
-            _load_env_file_if_present(env_path)
-            if os.getenv("user_pwd") or os.getenv("USER_PWD"):
-                break
+    # Always refresh password vars from .env so updates take effect immediately.
+    for env_path in _env_candidates():
+        _load_env_file_if_present(env_path, overwrite=True)
 
     raw = (os.getenv("user_pwd") or os.getenv("USER_PWD") or "").strip()
     if not raw:
@@ -58,7 +60,21 @@ def _get_allowed_passwords() -> list[str]:
 def _validate_password() -> None:
     entered = str(st.session_state.get("setting_pwd_input", "")).strip()
     allowed = _get_allowed_passwords()
-    st.session_state["auth_unlocked"] = bool(entered and entered in allowed)
+    matched_password = next((pwd for pwd in allowed if entered and entered == pwd), "")
+    st.session_state["auth_unlocked"] = bool(matched_password)
+    st.session_state["auth_has_ch1_pwd"] = bool(
+        matched_password and "ch1" in matched_password.lower()
+    )
+    # Clear typed password from session state after validation.
+    st.session_state["setting_pwd_input"] = ""
+    if st.session_state["auth_unlocked"]:
+        st.session_state["sidebar_info_section"] = None
+        if st.session_state["auth_has_ch1_pwd"]:
+            st.session_state["sidebar_main_section"] = "fod ch1"
+            st.session_state["active_panel"] = "main:fod ch1"
+        else:
+            st.session_state["sidebar_main_section"] = "comment analysis"
+            st.session_state["active_panel"] = "main:comment analysis"
 
 
 def initialize_auth_state() -> None:
@@ -66,10 +82,16 @@ def initialize_auth_state() -> None:
         st.session_state["setting_pwd_input"] = ""
     if "auth_unlocked" not in st.session_state:
         st.session_state["auth_unlocked"] = False
+    if "auth_has_ch1_pwd" not in st.session_state:
+        st.session_state["auth_has_ch1_pwd"] = False
 
 
 def is_auth_unlocked() -> bool:
     return bool(st.session_state.get("auth_unlocked", False))
+
+
+def use_ch1_title_variant() -> bool:
+    return bool(st.session_state.get("auth_has_ch1_pwd", False))
 
 
 def render_setting_page() -> None:
