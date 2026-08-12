@@ -31,6 +31,27 @@ EXPORT_EXCLUDED_COLUMNS = [
     "gpt_unknown_types",
 ]
 
+FOD_CH1_EXPORT_HEADERS = [
+    "Commentid",
+    "Chapter",
+    "Frompage",
+    "Fromline",
+    "Topage",
+    "Toline",
+    "Category",
+    "Textcommented",
+    "Comment",
+    "Reviewerlastname",
+    "Reviewerfirstname",
+    "Affiliation",
+    "Country",
+    "Excelline",
+    "Filename",
+    "Source",
+    "Category of Response",
+    "Reponse to comments",
+]
+
 DEFAULT_REQUIRED_COLUMNS = [
     "commentid",
     "chapter",
@@ -403,8 +424,51 @@ def _build_boolean_mask(text_series: pd.Series, query: str) -> pd.Series:
     return out
 
 
-def _dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    export_df = df.drop(columns=[c for c in EXPORT_EXCLUDED_COLUMNS if c in df.columns], errors="ignore")
+def _value_from_candidates(row: pd.Series, candidates: list[str]) -> object:
+    for col in candidates:
+        if col in row.index:
+            return row[col]
+    return ""
+
+
+def _build_fod_ch1_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    header_sources = {
+        "Commentid": ["Commentid", "commentid"],
+        "Chapter": ["Chapter", "chapter"],
+        "Frompage": ["Frompage", "frompage"],
+        "Fromline": ["Fromline", "fromline"],
+        "Topage": ["Topage", "topage"],
+        "Toline": ["Toline", "toline"],
+        "Category": ["Category", "category"],
+        "Textcommented": ["Textcommented", "textcommented"],
+        "Comment": ["Comment", "comment"],
+        "Reviewerlastname": ["Reviewerlastname", "reviewerlastname"],
+        "Reviewerfirstname": ["Reviewerfirstname", "reviewerfirstname"],
+        "Affiliation": ["Affiliation", "affiliation"],
+        "Country": ["Country", "country"],
+        "Excelline": ["Excelline", "excelline"],
+        "Filename": ["Filename", "filename"],
+        "Source": ["Source", "source"],
+        "Category of Response": ["Category of Response", "Action", "action"],
+        "Reponse to comments": ["Reponse to comments", "Response to comments", "reponsetocomments"],
+    }
+
+    export_rows: list[dict[str, object]] = []
+    for _, row in df.iterrows():
+        out_row: dict[str, object] = {}
+        for header in FOD_CH1_EXPORT_HEADERS:
+            out_row[header] = _value_from_candidates(row, header_sources.get(header, [header]))
+        export_rows.append(out_row)
+
+    return pd.DataFrame(export_rows, columns=FOD_CH1_EXPORT_HEADERS)
+
+
+def _dataframe_to_excel_bytes(df: pd.DataFrame, export_profile: str = "") -> bytes:
+    if export_profile == "srfodch1.parquet.enc":
+        export_df = _build_fod_ch1_export_df(df)
+    else:
+        export_df = df.drop(columns=[c for c in EXPORT_EXCLUDED_COLUMNS if c in df.columns], errors="ignore")
+
     output = io.BytesIO()
     with pd.ExcelWriter(output) as writer:
         export_df.to_excel(writer, index=False, sheet_name="filtered_results")
@@ -878,7 +942,7 @@ def _render_comment_analysis_base(
         if st.session_state[_state_key(state_prefix, "show_comments")] and not filtered.empty:
             st.download_button(
                 "Export",
-                data=_dataframe_to_excel_bytes(filtered),
+                data=_dataframe_to_excel_bytes(filtered, export_profile=source_file_name),
                 file_name=export_file_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
